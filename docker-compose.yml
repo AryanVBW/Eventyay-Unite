@@ -1,0 +1,101 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database for the tickets system
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: eventyay
+      POSTGRES_USER: eventyay
+      POSTGRES_PASSWORD: eventyay
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U eventyay"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis for caching and session storage
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+  # Eventyay Tickets (Django Backend)
+  tickets:
+    build:
+      context: ./eventyay-tickets
+      dockerfile: Dockerfile
+    environment:
+      - DJANGO_SETTINGS_MODULE=production_settings
+      - DATABASE_URL=postgresql://eventyay:eventyay@postgres:5432/eventyay
+      - REDIS_URL=redis://redis:6379/0
+      - PRETIX_INSTANCE_NAME=eventyay
+      - PRETIX_URL=http://localhost:8000
+      - PRETIX_CURRENCY=USD
+      - PRETIX_DATADIR=/data
+      - PRETIX_TRUST_X_FORWARDED_FOR=on
+      - PRETIX_TRUST_X_FORWARDED_PROTO=on
+    volumes:
+      - tickets_data:/data
+      - tickets_media:/data/media
+      - ./eventyay-tickets/src:/pretix/src
+    ports:
+      - "8000:80"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/healthcheck/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Eventyay Check-in (Vue.js Frontend)
+  checkin:
+    build:
+      context: ./eventyay-checkin
+      dockerfile: Dockerfile
+    environment:
+      - VITE_PROD_API_URL=http://localhost:8000/api/v1
+      - VITE_TEST_API_URL=http://localhost:8000/api/v1
+      - VITE_LOCAL_PORT=8080
+      - VITE_BASE_URL=/
+    ports:
+      - "8080:8080"
+    depends_on:
+      tickets:
+        condition: service_healthy
+    volumes:
+      - ./eventyay-checkin/src:/usr/src/app/src
+      - ./eventyay-checkin/public:/usr/src/app/public
+
+  # Nginx reverse proxy for unified access
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./ssl:/etc/nginx/ssl:ro
+    depends_on:
+      - tickets
+      - checkin
+
+volumes:
+  postgres_data:
+  redis_data:
+  tickets_data:
+  tickets_media:
+
+networks:
+  default:
+    name: eventyay-network
